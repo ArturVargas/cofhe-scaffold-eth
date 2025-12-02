@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title EVVM Core - Virtual Blockchain with FHE
 /// @notice MVP of EVVM Core as "virtual blockchain" using FHE for private balances
-/// @dev Step 7: Utility functions
+/// @dev Step 8: Advanced block management
 contract EVVMCore is Ownable {
     // ============ Structs ============
     
@@ -36,6 +36,15 @@ contract EVVMCore is Ownable {
         InEuint64 amount;     // Encrypted amount to transfer
         uint64 expectedNonce; // Expected nonce for the source account
     }
+    
+    /// @notice Represents a virtual block in the blockchain
+    struct VirtualBlock {
+        uint64 blockNumber;   // Block number
+        bytes32 stateCommitment; // State commitment at this block
+        uint256 timestamp;     // Block timestamp
+        uint256 transactionCount; // Number of transactions in this block
+        bool exists;           // Existence flag
+    }
 
     // ============ State Variables ============
     
@@ -63,7 +72,11 @@ contract EVVMCore is Ownable {
     /// @notice Next transaction ID to be assigned
     /// @dev Starts at 1, increments for each new transaction
     uint256 public nextTxId;
-
+    
+    /// @notice Map of block numbers to virtual block information
+    /// @dev Stores metadata about each virtual block
+    mapping(uint64 => VirtualBlock) public virtualBlocks;
+    
     // ============ Events ============
     
     /// @notice Emitted when a new virtual account is registered
@@ -231,6 +244,17 @@ contract EVVMCore is Ownable {
         // Increment virtual block number if this is a single transfer
         if (incrementBlock) {
             vBlockNumber += 1;
+            
+            // Create or update block information for single transfers
+            if (!virtualBlocks[vBlockNumber].exists) {
+                virtualBlocks[vBlockNumber] = VirtualBlock({
+                    blockNumber: vBlockNumber,
+                    stateCommitment: stateCommitment, // Use current commitment
+                    timestamp: block.timestamp,
+                    transactionCount: 0,
+                    exists: true
+                });
+            }
         }
         
         // Assign unique transaction ID
@@ -238,15 +262,21 @@ contract EVVMCore is Ownable {
         nextTxId += 1;
         
         // Store the transaction (vBlockNumber is set by caller for batch operations)
+        uint64 currentBlockNumber = incrementBlock ? vBlockNumber : 0; // Will be set by batch caller
         virtualTransactions[txId] = VirtualTransaction({
             fromVaddr: fromVaddr,
             toVaddr: toVaddr,
             amountEnc: amountEnc,
             nonce: usedNonce,
-            vBlockNumber: incrementBlock ? vBlockNumber : 0, // Will be set by batch caller
+            vBlockNumber: currentBlockNumber,
             timestamp: block.timestamp,
             exists: true
         });
+        
+        // Update block transaction count if block exists
+        if (incrementBlock && virtualBlocks[vBlockNumber].exists) {
+            virtualBlocks[vBlockNumber].transactionCount += 1;
+        }
         
         // Permissions: contract and sender can operate/read the new balances
         FHE.allowThis(newFromBalance);
@@ -279,23 +309,90 @@ contract EVVMCore is Ownable {
     
     /// @notice Creates a new virtual block with a state commitment
     /// @dev This function allows explicit block creation with a cryptographic commitment
+    /// @dev Validates that the commitment is not empty and that block number increments correctly
     /// @param newCommitment The state commitment for the new block (e.g., Merkle root of all accounts)
-    function createVirtualBlock(bytes32 newCommitment) external {
+    /// @return blockNumber The newly created block number
+    function createVirtualBlock(bytes32 newCommitment) external returns (uint64 blockNumber) {
+        // Validation: commitment should not be empty (optional but recommended)
+        // Note: bytes32(0) is technically valid but may indicate an error
+        require(newCommitment != bytes32(0), "EVVM: commitment cannot be zero");
+        
         // Increment block number
         vBlockNumber += 1;
+        blockNumber = vBlockNumber;
         
         // Update state commitment
         stateCommitment = newCommitment;
         
+        // Store block information
+        // Note: transactionCount will be updated by transfer functions
+        virtualBlocks[blockNumber] = VirtualBlock({
+            blockNumber: blockNumber,
+            stateCommitment: newCommitment,
+            timestamp: block.timestamp,
+            transactionCount: 0, // Will be updated by transactions
+            exists: true
+        });
+        
         // Emit block creation event
-        emit VirtualBlockCreated(vBlockNumber, newCommitment);
+        emit VirtualBlockCreated(blockNumber, newCommitment);
+        
+        return blockNumber;
     }
     
     /// @notice Updates the state commitment without creating a new block
     /// @dev Useful for updating the commitment when state changes occur
+    /// @dev Validates that the commitment is not empty
     /// @param newCommitment The new state commitment
     function updateStateCommitment(bytes32 newCommitment) external {
+        // Validation: commitment should not be empty
+        require(newCommitment != bytes32(0), "EVVM: commitment cannot be zero");
+        
+        // Update state commitment
         stateCommitment = newCommitment;
+        
+        // Update the current block's commitment if it exists
+        if (virtualBlocks[vBlockNumber].exists) {
+            virtualBlocks[vBlockNumber].stateCommitment = newCommitment;
+        }
+        
+        emit StateCommitmentUpdated(newCommitment);
+    }
+    
+    /// @notice Retrieves information about a specific virtual block
+    /// @param blockNumber The virtual block number to query
+    /// @return blockInfo The virtual block struct with all block information
+    /// @dev Returns block number, state commitment, timestamp, and transaction count
+    function getBlockInfo(uint64 blockNumber) external view returns (VirtualBlock memory blockInfo) {
+        require(virtualBlocks[blockNumber].exists, "EVVM: block does not exist");
+        return virtualBlocks[blockNumber];
+    }
+    
+    /// @notice Updates the state commitment after a batch of transfers
+    /// @dev This function should be called after applyTransferBatch() to update the commitment
+    /// @dev Useful for maintaining accurate state commitments after batch operations
+    /// @param newCommitment The new state commitment calculated off-chain after the batch
+    function updateStateCommitmentAfterBatch(bytes32 newCommitment) external {
+        // Validation: commitment should not be empty
+        require(newCommitment != bytes32(0), "EVVM: commitment cannot be zero");
+        
+        // Update state commitment
+        stateCommitment = newCommitment;
+        
+        // Update the current block's commitment
+        if (virtualBlocks[vBlockNumber].exists) {
+            virtualBlocks[vBlockNumber].stateCommitment = newCommitment;
+        } else {
+            // If block doesn't exist yet, create it
+            virtualBlocks[vBlockNumber] = VirtualBlock({
+                blockNumber: vBlockNumber,
+                stateCommitment: newCommitment,
+                timestamp: block.timestamp,
+                transactionCount: 0, // Will be updated by transactions
+                exists: true
+            });
+        }
+        
         emit StateCommitmentUpdated(newCommitment);
     }
     
@@ -338,6 +435,15 @@ contract EVVMCore is Ownable {
         vBlockNumber += 1;
         uint64 batchBlockNumber = vBlockNumber;
         
+        // Create block information for the batch
+        virtualBlocks[batchBlockNumber] = VirtualBlock({
+            blockNumber: batchBlockNumber,
+            stateCommitment: stateCommitment, // Use current commitment (can be updated later)
+            timestamp: block.timestamp,
+            transactionCount: 0, // Will be updated as transactions succeed
+            exists: true
+        });
+        
         // Process each transfer with error handling
         for (uint256 i = 0; i < length; i++) {
             try this._applyTransferInternal(
@@ -354,6 +460,9 @@ contract EVVMCore is Ownable {
                 // Update the stored transaction to use the batch block number
                 virtualTransactions[txId].vBlockNumber = batchBlockNumber;
                 
+                // Update block transaction count
+                virtualBlocks[batchBlockNumber].transactionCount += 1;
+                
                 // Re-emit event with correct block number (optional, for clarity)
                 // Note: The event was already emitted in _applyTransferInternal with vBlockNumber=0
                 // This is acceptable as events are for logging and the stored transaction has the correct block
@@ -364,9 +473,10 @@ contract EVVMCore is Ownable {
             }
         }
         
-        // If no transfers succeeded, revert the block number increment
+        // If no transfers succeeded, revert the block number increment and remove block
         if (successfulTxs == 0) {
             vBlockNumber -= 1;
+            delete virtualBlocks[batchBlockNumber];
         }
         
         return (successfulTxs, failedTxs, txIds);
