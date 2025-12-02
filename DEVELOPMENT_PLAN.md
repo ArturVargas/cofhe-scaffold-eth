@@ -600,3 +600,80 @@ event CoffeeOrdered(
 - Treasury functions
 - Cross-chain bridge (Fisher Bridge)
 - Advanced signature schemes for EVVMCafe (EIP-712, EIP-191)
+- **Async nonces support** - Allow nonces to be used out of order (see Step 5B below)
+
+---
+
+## 📋 Step 5B: Async Nonces Support (Future Enhancement)
+
+**Objective**: Add support for async (out-of-order) nonces while maintaining sync nonces as default.
+
+**Files to create/modify**:
+- `packages/hardhat/contracts/core/EVVM.core.sol`
+
+**Features to add**:
+
+- `mapping(bytes32 => mapping(uint64 => bool)) private usedNonces` - track which nonces have been used per account
+- `bool public asyncNoncesEnabled` - flag to enable/disable async nonces globally
+- `mapping(bytes32 => bool) public accountAsyncNoncesEnabled` - per-account async nonce flag
+- Modify `applyTransfer()` to support both sync and async nonce validation
+- Add `enableAsyncNonces(bytes32 vaddr)` - allow a specific account to use async nonces
+- Update `VirtualAccount` struct to track highest nonce used (optional)
+
+**Key code structure**:
+
+```solidity
+// State variables
+mapping(bytes32 => mapping(uint64 => bool)) private usedNonces;
+bool public asyncNoncesEnabled; // Global flag
+mapping(bytes32 => bool) public accountAsyncNoncesEnabled; // Per-account flag
+
+// In applyTransfer(), replace nonce validation:
+if (asyncNoncesEnabled && accountAsyncNoncesEnabled[fromVaddr]) {
+    // Async nonce: check if already used
+    require(!usedNonces[fromVaddr][expectedNonce], "EVVM: nonce already used");
+    usedNonces[fromVaddr][expectedNonce] = true;
+    
+    // Update highest nonce used (optional, for reference)
+    if (expectedNonce > fromAcc.nonce) {
+        fromAcc.nonce = expectedNonce;
+    }
+} else {
+    // Sync nonce: must be sequential
+    require(fromAcc.nonce == expectedNonce, "EVVM: bad nonce");
+    fromAcc.nonce += 1;
+}
+
+// New function
+function enableAsyncNonces(bytes32 vaddr) external {
+    require(accounts[vaddr].exists, "EVVM: account does not exist");
+    // Only account owner or contract owner can enable
+    // (requires signature validation or ownership check)
+    accountAsyncNoncesEnabled[vaddr] = true;
+}
+```
+
+**Why Async Nonces?**
+
+1. **Parallel Transaction Processing**: 
+   - Users can submit multiple transactions simultaneously with different nonces
+   - No need to wait for previous transactions to be confirmed
+   - Useful for high-frequency trading or batch operations
+
+2. **Network Congestion Handling**:
+   - If transaction with nonce 5 arrives before nonce 4, it can still be processed
+   - Reduces failed transactions due to out-of-order arrival
+
+3. **Flexibility**:
+   - Some use cases require out-of-order execution
+   - Maintains backward compatibility with sync nonces as default
+
+**Trade-offs**:
+
+- **Storage Cost**: Requires additional mapping to track used nonces
+- **Gas Cost**: Slightly higher gas per transaction (checking mapping)
+- **Complexity**: More complex validation logic
+
+**Context**: This enhancement allows users to submit transactions with nonces out of order, which is useful for parallel processing and handling network congestion. The system maintains backward compatibility by keeping sync nonces as the default behavior.
+
+**Commit message**: `feat: Add async nonces support for out-of-order transaction processing`
