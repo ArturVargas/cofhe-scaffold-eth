@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title EVVM Core - Virtual Blockchain with FHE
 /// @notice MVP of EVVM Core as "virtual blockchain" using FHE for private balances
-/// @dev Step 6: Batch transfers
+/// @dev Step 7: Utility functions
 contract EVVMCore is Ownable {
     // ============ Structs ============
     
@@ -154,6 +154,15 @@ contract EVVMCore is Ownable {
     function getNonce(bytes32 vaddr) external view returns (uint64) {
         require(accounts[vaddr].exists, "EVVM: account does not exist");
         return accounts[vaddr].nonce;
+    }
+    
+    /// @notice Returns the complete virtual account information
+    /// @param vaddr Virtual address of the account
+    /// @return account The complete VirtualAccount struct
+    /// @dev Returns balance (encrypted), nonce, and exists flag
+    function getAccount(bytes32 vaddr) external view returns (VirtualAccount memory) {
+        require(accounts[vaddr].exists, "EVVM: account does not exist");
+        return accounts[vaddr];
     }
 
     // ============ Virtual Transactions ============
@@ -361,5 +370,26 @@ contract EVVMCore is Ownable {
         }
         
         return (successfulTxs, failedTxs, txIds);
+    }
+    
+    // ============ Utility Functions ============
+    
+    /// @notice Generates a virtual address from an Ethereum address and optional salt
+    /// @param realAddress The Ethereum address to convert
+    /// @param salt Optional salt for additional entropy (use bytes32(0) for default)
+    /// @return vaddr The generated virtual address
+    /// @dev This is a helper function to create deterministic vaddr from Ethereum addresses
+    /// @dev Formula: keccak256(abi.encodePacked(realAddress, vChainId, evvmID, salt))
+    function generateVaddrFromAddress(
+        address realAddress,
+        bytes32 salt
+    ) external view returns (bytes32) {
+        if (salt == bytes32(0)) {
+            // Default: use address, chainId, and evvmID
+            return keccak256(abi.encodePacked(realAddress, vChainId, evvmID));
+        } else {
+            // With custom salt for additional entropy
+            return keccak256(abi.encodePacked(realAddress, vChainId, evvmID, salt));
+        }
     }
 }
