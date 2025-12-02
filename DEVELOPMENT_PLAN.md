@@ -268,6 +268,217 @@ To implement each step:
 
 ---
 
+---
+
+## 📋 Step 13: Address-to-Vaddr Compatibility Layer
+
+**Objective**: Add compatibility functions to map Ethereum addresses to virtual addresses, enabling integration with traditional contracts.
+
+**Files to create/modify**:
+- `packages/hardhat/contracts/core/EVVM.core.sol`
+
+**Features to add**:
+
+- `mapping(address => bytes32) public addressToVaddr` - maps real addresses to virtual addresses
+- `mapping(bytes32 => address) public vaddrToAddress` - reverse mapping
+- `registerAccountFromAddress(address realAddress, InEuint64 initialBalance)` - convenience function that auto-generates vaddr
+- `getVaddrFromAddress(address realAddress) external view returns (bytes32)` - query vaddr for an address
+- `requestPay(address from, address to, InEuint64 amount, uint64 nonce)` - compatibility function that uses addresses instead of vaddr
+
+**Key code**:
+
+```solidity
+mapping(address => bytes32) public addressToVaddr;
+mapping(bytes32 => address) public vaddrToAddress;
+
+function registerAccountFromAddress(
+    address realAddress,
+    InEuint64 calldata initialBalance
+) external {
+    bytes32 vaddr = keccak256(abi.encodePacked(realAddress, vChainId, evvmID));
+    require(!accounts[vaddr].exists, "EVVM: account already exists");
+    
+    addressToVaddr[realAddress] = vaddr;
+    vaddrToAddress[vaddr] = realAddress;
+    
+    registerAccount(vaddr, initialBalance);
+}
+
+function requestPay(
+    address from,
+    address to,
+    InEuint64 calldata amount,
+    uint64 expectedNonce
+) external returns (uint256 txId) {
+    bytes32 fromVaddr = addressToVaddr[from];
+    bytes32 toVaddr = addressToVaddr[to];
+    
+    require(fromVaddr != bytes32(0), "EVVM: from address not registered");
+    require(toVaddr != bytes32(0), "EVVM: to address not registered");
+    
+    return applyTransfer(fromVaddr, toVaddr, amount, expectedNonce);
+}
+```
+
+**Context**: This step enables traditional Solidity contracts (like EVVMCafe) to interact with EVVM using Ethereum addresses instead of virtual addresses. It bridges the gap between the public address model and the private virtual address model.
+
+**Commit message**: `feat: Add address-to-vaddr compatibility layer for contract integration`
+
+---
+
+## 📋 Step 14: EVVMCafe Contract Adaptation
+
+**Objective**: Create an adapted version of EVVMCafe that works with the FHE-enabled EVVM Core.
+
+**Files to create**:
+- `packages/hardhat/contracts/examples/EVVMCafe.sol`
+
+**Features to implement**:
+
+- Remove dependency on `EvvmService` library
+- Use `EVVMCore` directly with address-based functions
+- Adapt `orderCoffee()` to use encrypted amounts (`InEuint64`)
+- Remove staking/rewards functionality (or mark as TODO for future)
+- Simplify signature validation (or use basic EIP-712)
+- Add helper functions for encrypted balance queries
+
+**Key code structure**:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import "../core/EVVM.core.sol";
+
+contract EVVMCafe {
+    EVVMCore public evvmCore;
+    address public ownerOfShop;
+    
+    // Service nonce tracking (simplified)
+    mapping(address => mapping(uint256 => bool)) private usedNonces;
+    
+    constructor(address _evvmAddress, address _ownerOfShop) {
+        evvmCore = EVVMCore(_evvmAddress);
+        ownerOfShop = _ownerOfShop;
+    }
+    
+    function orderCoffee(
+        address clientAddress,
+        string memory coffeeType,
+        uint256 quantity,
+        InEuint64 calldata totalPriceEnc,  // Encrypted price
+        uint256 nonce,
+        bytes memory signature,
+        uint64 evvmNonce
+    ) external {
+        // 1. Validate service signature
+        // 2. Check service nonce
+        // 3. Request payment via EVVM (using address-based function)
+        evvmCore.requestPay(
+            clientAddress,
+            address(this),
+            totalPriceEnc,
+            evvmNonce
+        );
+        // 4. Mark nonce as used
+        usedNonces[clientAddress][nonce] = true;
+    }
+    
+    function withdrawFunds(address to, InEuint64 calldata amount) external onlyOwner {
+        // Transfer encrypted funds from shop to owner
+        bytes32 shopVaddr = evvmCore.getVaddrFromAddress(address(this));
+        bytes32 toVaddr = evvmCore.getVaddrFromAddress(to);
+        uint64 nonce = evvmCore.getNonce(shopVaddr);
+        
+        evvmCore.applyTransfer(shopVaddr, toVaddr, amount, nonce);
+    }
+}
+```
+
+**Context**: This step demonstrates how to build a real-world application on top of EVVM with FHE. It shows the pattern for integrating traditional contracts with the virtual blockchain while maintaining privacy through encrypted amounts.
+
+**Commit message**: `feat: Add EVVMCafe example contract adapted for FHE-enabled EVVM`
+
+---
+
+## 📋 Step 15: Example Integration Testing and Documentation
+
+**Objective**: Complete the EVVMCafe integration with testing utilities and comprehensive documentation.
+
+**Files to create/modify**:
+- `packages/hardhat/contracts/examples/EVVMCafe.sol` (complete implementation)
+- `packages/hardhat/test/EVVMCafe.integration.test.ts` (optional, for future)
+
+**Features to add**:
+
+- Complete `EVVMCafe` implementation with all helper functions
+- Add `getShopBalance()` - returns encrypted balance of the shop
+- Add `getClientBalance(address client)` - returns encrypted balance of a client
+- Add proper error handling and events
+- Add NatSpec documentation explaining the FHE integration pattern
+- Add usage examples in comments
+
+**Key additions**:
+
+```solidity
+/// @notice Returns the encrypted balance of the coffee shop
+/// @dev Frontend must decrypt this using cofhesdkClient.decryptHandle()
+function getShopBalance() external view returns (euint64) {
+    bytes32 shopVaddr = evvmCore.getVaddrFromAddress(address(this));
+    return evvmCore.getEncryptedBalance(shopVaddr);
+}
+
+/// @notice Returns the encrypted balance of a client
+/// @param client Address of the client
+/// @dev Frontend must decrypt this using cofhesdkClient.decryptHandle()
+function getClientBalance(address client) external view returns (euint64) {
+    bytes32 clientVaddr = evvmCore.getVaddrFromAddress(client);
+    return evvmCore.getEncryptedBalance(clientVaddr);
+}
+
+/// @notice Event emitted when coffee is ordered
+event CoffeeOrdered(
+    address indexed client,
+    string coffeeType,
+    uint256 quantity,
+    uint64 evvmNonce
+);
+```
+
+**Documentation to add**:
+
+- Usage flow: How to register accounts, place orders, and withdraw funds
+- FHE integration pattern: How to handle encrypted amounts in contracts
+- Frontend integration: How to encrypt/decrypt amounts using CoFHE SDK
+- Limitations: What features are not yet implemented (staking, rewards, etc.)
+
+**Context**: This step completes the example integration, providing a working reference implementation that developers can use as a template for building their own applications on EVVM with FHE.
+
+**Commit message**: `feat: Complete EVVMCafe integration with documentation and helper functions`
+
+---
+
+## 📊 Updated Progress Summary
+
+| Step | Main Functionality | Dependencies |
+|------|-------------------|--------------|
+| 1 | Base structure | None |
+| 2 | Virtual accounts | Step 1 |
+| 3 | Transfers | Step 2 |
+| 4 | Virtual blocks | Step 3 |
+| 5 | Transaction registry | Step 3 |
+| 6 | Batch transfers | Step 3, 5 |
+| 7 | Utilities | Step 2, 3 |
+| 8 | Block management | Step 4 |
+| 9 | Admin/Testing | All previous |
+| 10 | Documentation | All previous |
+| 13 | Address compatibility | Step 2, 3 |
+| 14 | EVVMCafe contract | Step 13 |
+| 15 | Integration docs | Step 14 |
+
+---
+
 ## 🔮 Future Extensions (Post-MVP)
 
 - Signature validation for transactions
@@ -277,3 +488,4 @@ To implement each step:
 - Staking system
 - Treasury functions
 - Cross-chain bridge (Fisher Bridge)
+- Advanced signature schemes for EVVMCafe (EIP-712, EIP-191)

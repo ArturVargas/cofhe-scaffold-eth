@@ -154,6 +154,12 @@ contract EVVMCore is Ownable {
         // Interpret the handle as encrypted uint64
         euint64 amountEnc = FHE.asEuint64(amount);
         
+        // Set permissions on the encrypted amount before using it in operations
+        // This contract needs permission to operate on the encrypted value
+        FHE.allowThis(amountEnc);
+        // Allow sender to use the encrypted amount (for potential future operations)
+        FHE.allowSender(amountEnc);
+        
         // FHE arithmetic on encrypted balances
         euint64 newFromBalance = FHE.sub(fromAcc.balance, amountEnc);
         euint64 newToBalance = FHE.add(toAcc.balance, amountEnc);
@@ -161,6 +167,10 @@ contract EVVMCore is Ownable {
         // Update balances
         fromAcc.balance = newFromBalance;
         toAcc.balance = newToBalance;
+        
+        // Capture the nonce that was used for this transaction (before increment)
+        // This ensures the event accurately records which nonce was consumed
+        uint64 usedNonce = fromAcc.nonce;
         
         // Increment nonce and virtual chain height
         fromAcc.nonce += 1;
@@ -179,7 +189,7 @@ contract EVVMCore is Ownable {
             fromVaddr,
             toVaddr,
             amountEnc,
-            fromAcc.nonce,
+            usedNonce,
             vBlockNumber,
             txId
         );
