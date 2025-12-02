@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title EVVM Core - Virtual Blockchain with FHE
 /// @notice MVP of EVVM Core as "virtual blockchain" using FHE for private balances
-/// @dev Step 2: Virtual account system
+/// @dev Step 3: Basic transfers
 contract EVVMCore is Ownable {
     // ============ Structs ============
     
@@ -42,7 +42,6 @@ contract EVVMCore is Ownable {
     );
     
     /// @notice Emitted when a virtual transaction is applied
-    /// @dev Will be implemented in step 3
     event VirtualTransferApplied(
         bytes32 indexed fromVaddr,
         bytes32 indexed toVaddr,
@@ -125,5 +124,66 @@ contract EVVMCore is Ownable {
     function getNonce(bytes32 vaddr) external view returns (uint64) {
         require(accounts[vaddr].exists, "EVVM: account does not exist");
         return accounts[vaddr].nonce;
+    }
+
+    // ============ Virtual Transactions ============
+    
+    /// @notice Applies a transfer within the virtual blockchain
+    /// @dev Transaction model: (from, to, amount, nonce, chainId)
+    /// For MVP we don't validate signatures, only check nonce and existence
+    /// @param fromVaddr Source virtual account
+    /// @param toVaddr Destination virtual account
+    /// @param amount Encrypted handle of the amount (InEuint64)
+    /// @param expectedNonce Nonce that the caller believes `fromVaddr` has
+    /// @return txId Transaction ID (temporary, will be properly stored in step 5)
+    function applyTransfer(
+        bytes32 fromVaddr,
+        bytes32 toVaddr,
+        InEuint64 calldata amount,
+        uint64 expectedNonce
+    ) external returns (uint256 txId) {
+        require(accounts[fromVaddr].exists, "EVVM: from account missing");
+        require(accounts[toVaddr].exists, "EVVM: to account missing");
+        
+        VirtualAccount storage fromAcc = accounts[fromVaddr];
+        VirtualAccount storage toAcc = accounts[toVaddr];
+        
+        // Replay protection: check the nonce
+        require(fromAcc.nonce == expectedNonce, "EVVM: bad nonce");
+        
+        // Interpret the handle as encrypted uint64
+        euint64 amountEnc = FHE.asEuint64(amount);
+        
+        // FHE arithmetic on encrypted balances
+        euint64 newFromBalance = FHE.sub(fromAcc.balance, amountEnc);
+        euint64 newToBalance = FHE.add(toAcc.balance, amountEnc);
+        
+        // Update balances
+        fromAcc.balance = newFromBalance;
+        toAcc.balance = newToBalance;
+        
+        // Increment nonce and virtual chain height
+        fromAcc.nonce += 1;
+        vBlockNumber += 1;
+        
+        // Temporary txId (will be properly implemented in step 5)
+        txId = vBlockNumber; // Using block number as temporary ID
+        
+        // Permissions: contract and sender can operate/read the new balances
+        FHE.allowThis(newFromBalance);
+        FHE.allowThis(newToBalance);
+        FHE.allowSender(newFromBalance);
+        FHE.allowSender(newToBalance);
+        
+        emit VirtualTransferApplied(
+            fromVaddr,
+            toVaddr,
+            amountEnc,
+            fromAcc.nonce,
+            vBlockNumber,
+            txId
+        );
+        
+        return txId;
     }
 }
