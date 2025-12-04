@@ -26,6 +26,11 @@ contract EVVMCafe is Ownable {
     /// @dev In a production system, prices could also be encrypted
     mapping(string => uint256) public coffeePrices;
     
+    // ============ Errors ============
+    
+    /// @notice Error thrown when shop is already registered
+    error ShopAlreadyRegistered();
+    
     // ============ Events ============
     
     /// @notice Emitted when a coffee order is placed
@@ -69,22 +74,26 @@ contract EVVMCafe is Ownable {
 
     // ============ Coffee Ordering ============
     
-    /// @notice Places a coffee order and processes encrypted payment
-    /// @param clientAddress Address of the client ordering coffee
-    /// @param coffeeType Type of coffee to order
+    /// @notice Places a coffee order after payment has been made via EVVMCore
+    /// @param clientAddress Address of the client placing the order
+    /// @param coffeeType Type of coffee (e.g., "espresso", "latte")
     /// @param quantity Number of coffees to order
-    /// @param totalPriceEnc Encrypted total price (must match coffeeType * quantity)
+    /// @param paymentTxId Transaction ID from EVVMCore.requestPay() that was called separately
     /// @param nonce Service-level nonce to prevent replay attacks
-    /// @param evvmNonce EVVM nonce for the client's account
-    /// @dev The client must have registered their account in EVVM Core first
-    /// @dev The totalPriceEnc should be calculated off-chain: encrypt(coffeePrices[coffeeType] * quantity)
+    /// @param expectedNonce The nonce that was used in the payment transaction
+    /// @dev The client must call EVVMCore.requestPay() first from the frontend, then call this function with the txId
+    /// @dev This function verifies that the payment was successful by checking:
+    ///      - The transaction exists
+    ///      - The transaction is from the client to the shop
+    ///      - The nonce matches (proving the payment consumed the expected nonce)
+    ///      - The client's current nonce is expectedNonce + 1 (proving payment was processed)
     function orderCoffee(
         address clientAddress,
         string memory coffeeType,
         uint256 quantity,
-        InEuint64 calldata totalPriceEnc,
+        uint256 paymentTxId,
         uint256 nonce,
-        uint64 evvmNonce
+        uint64 expectedNonce
     ) external {
         // 1. Validate input
         require(quantity > 0, "EVVMCafe: quantity must be greater than 0");
@@ -98,28 +107,26 @@ contract EVVMCafe is Ownable {
         bytes32 clientVaddr = evvmCore.getVaddrFromAddress(clientAddress);
         require(clientVaddr != bytes32(0), "EVVMCafe: client not registered in EVVM");
         
-        // 4. Verify shop is registered in EVVM (auto-register if not)
+        // 4. Verify shop is registered in EVVM
         bytes32 shopVaddr = evvmCore.getVaddrFromAddress(address(this));
-        if (shopVaddr == bytes32(0)) {
-            // Auto-register shop with zero balance if not registered
-            // Note: This requires the shop to have an encrypted zero balance
-            // In production, this should be done during contract setup
-            revert("EVVMCafe: shop must be registered in EVVM before first order");
-        }
+        require(shopVaddr != bytes32(0), "EVVMCafe: shop must be registered in EVVM before first order");
         
-        // 5. Process payment via EVVM (using address-based compatibility function)
-        evvmCore.requestPay(
-            clientAddress,
-            address(this),
-            totalPriceEnc,
-            evvmNonce
-        );
+        // 5. Verify payment transaction exists and is valid
+        EVVMCore.VirtualTransaction memory paymentTx = evvmCore.getVirtualTransaction(paymentTxId);
+        require(paymentTx.exists, "EVVMCafe: payment transaction does not exist");
+        require(paymentTx.fromVaddr == clientVaddr, "EVVMCafe: payment transaction not from client");
+        require(paymentTx.toVaddr == shopVaddr, "EVVMCafe: payment transaction not to shop");
+        require(paymentTx.nonce == expectedNonce, "EVVMCafe: payment transaction nonce mismatch");
         
-        // 6. Mark service nonce as used
+        // 6. Verify client's current nonce matches expectedNonce + 1 (proving payment was processed)
+        uint64 currentNonce = evvmCore.getNonce(clientVaddr);
+        require(currentNonce == expectedNonce + 1, "EVVMCafe: client nonce does not match payment");
+        
+        // 7. Mark service nonce as used
         usedNonces[clientAddress][nonce] = true;
         
-        // 7. Emit event
-        emit CoffeeOrdered(clientAddress, coffeeType, quantity, evvmNonce);
+        // 8. Emit event
+        emit CoffeeOrdered(clientAddress, coffeeType, quantity, expectedNonce);
     }
 
     // ============ Fund Management ============
@@ -195,19 +202,63 @@ contract EVVMCafe is Ownable {
     /// @param initialBalance Encrypted initial balance for the shop (usually zero)
     /// @dev This function should be called during setup to register the shop's address in EVVM
     /// @dev The shop address will be automatically mapped to a vaddr
+    /// @notice Registers the shop in EVVM Core (must be called before first order)
+    /// @param initialBalance Encrypted initial balance for the shop (usually zero)
+    /// @dev This function should be called during setup to register the shop's address in EVVM
+    /// @dev The shop address will be automatically mapped to a vaddr
+    /// @dev Logic:
+    ///   1. Check if shop address is already mapped to a vaddr in EVVMCore
+    ///   2. If mapped, verify the account exists - if yes, revert with ShopAlreadyRegistered
+    ///   3. If not mapped, generate the vaddr deterministically and check if account exists
+    ///   4. If account exists via generated vaddr, revert with ShopAlreadyRegistered
+    ///   5. Otherwise, call registerAccountFromAddress to register the shop
     function registerShopInEVVM(InEuint64 calldata initialBalance) external {
+        // Step 1: Check if address is already mapped to a vaddr
         bytes32 shopVaddr = evvmCore.getVaddrFromAddress(address(this));
-        require(shopVaddr == bytes32(0), "EVVMCafe: shop already registered");
+        if (shopVaddr != bytes32(0)) {
+            // Step 2: If mapped, verify the account actually exists
+            if (evvmCore.accountExists(shopVaddr)) {
+                revert ShopAlreadyRegistered();
+            }
+            // If mapped but account doesn't exist, something is wrong - continue anyway
+        }
         
-        // Register shop using address-based function
+        // Step 3: Generate the vaddr deterministically (same formula used in registerAccountFromAddress)
+        bytes32 generatedVaddr = evvmCore.generateVaddrFromAddress(address(this), bytes32(0));
+        
+        // Step 4: Check if account exists via generated vaddr
+        // This handles the case where shop was registered via registerAccount() directly
+        // (without using registerAccountFromAddress, so no mapping was created)
+        if (evvmCore.accountExists(generatedVaddr)) {
+            revert ShopAlreadyRegistered();
+        }
+        
+        // Step 5: Register shop using address-based function
+        // This will:
+        //   - Generate the same vaddr we just checked
+        //   - Create the mapping addressToVaddr[address(this)] = vaddr
+        //   - Create the account with the encrypted balance
+        //   - Set FHE permissions
+        // If the shop is already registered, this will revert with:
+        //   - "EVVM: account already exists" (if vaddr exists)
+        //   - "EVVM: address already registered" (if address is mapped)
         evvmCore.registerAccountFromAddress(address(this), initialBalance);
     }
     
     /// @notice Checks if the shop is registered in EVVM
     /// @return registered True if the shop is registered
     function isShopRegistered() external view returns (bool) {
+        // First check if address is mapped to a vaddr
         bytes32 shopVaddr = evvmCore.getVaddrFromAddress(address(this));
-        return shopVaddr != bytes32(0);
+        if (shopVaddr != bytes32(0)) {
+            // If mapped, verify the account actually exists
+            return evvmCore.accountExists(shopVaddr);
+        }
+        
+        // If not mapped, try to generate the vaddr and check if account exists
+        // This handles the case where shop was registered via registerAccount() directly
+        bytes32 generatedVaddr = evvmCore.generateVaddrFromAddress(address(this), bytes32(0));
+        return evvmCore.accountExists(generatedVaddr);
     }
 
     // ============ Admin Functions ============

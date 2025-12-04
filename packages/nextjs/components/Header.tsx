@@ -21,7 +21,10 @@ export const menuLinks: HeaderMenuLink[] = [
     label: "Home",
     href: "/",
   },
-
+  {
+    label: "EVVM Cafe",
+    href: "/evvm-cafe",
+  },
   {
     label: "Debug Contracts",
     href: "/debug",

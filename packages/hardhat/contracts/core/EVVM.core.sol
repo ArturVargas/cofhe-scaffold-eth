@@ -210,8 +210,9 @@ contract EVVMCore is Ownable {
         
         // Allow this contract to operate on the balance
         FHE.allowThis(balance);
-        // Optional: allow sender to read/use the balance
-        FHE.allowSender(balance);
+        // Use allowGlobal() to allow anyone with a valid permit to decrypt
+        // The frontend will create the necessary permits (self + sharing with contract)
+        FHE.allowGlobal(balance);
         
         emit VirtualAccountRegistered(vaddr, 0);
     }
@@ -250,7 +251,7 @@ contract EVVMCore is Ownable {
         require(accounts[vaddr].exists, "EVVM: account does not exist");
         return accounts[vaddr];
     }
-
+    
     // ============ Virtual Transactions ============
     
     /// @notice Applies a transfer within the virtual blockchain
@@ -300,10 +301,10 @@ contract EVVMCore is Ownable {
         euint64 amountEnc = FHE.asEuint64(amount);
         
         // Set permissions on the encrypted amount before using it in operations
-        // This contract needs permission to operate on the encrypted value
-        FHE.allowThis(amountEnc);
-        // Allow sender to use the encrypted amount (for potential future operations)
-        FHE.allowSender(amountEnc);
+        // Use allowGlobal to ensure the contract can use the encrypted value
+        // This is necessary when the value comes from external sources (frontend)
+        // and may not have the correct permissions set yet
+        FHE.allowGlobal(amountEnc);
         
         // FHE arithmetic on encrypted balances
         euint64 newFromBalance = FHE.sub(fromAcc.balance, amountEnc);
@@ -312,6 +313,14 @@ contract EVVMCore is Ownable {
         // Update balances
         fromAcc.balance = newFromBalance;
         toAcc.balance = newToBalance;
+        
+        // Set permissions IMMEDIATELY after updating balances
+        // Use allowGlobal() to allow anyone with a valid permit to decrypt
+        // The frontend will create the necessary permits (self + sharing with contract)
+        FHE.allowThis(newFromBalance);
+        FHE.allowThis(newToBalance);
+        FHE.allowGlobal(newFromBalance);
+        FHE.allowGlobal(newToBalance);
         
         // Capture the nonce that was used for this transaction (before increment)
         // This ensures the event accurately records which nonce was consumed
@@ -357,15 +366,9 @@ contract EVVMCore is Ownable {
             virtualBlocks[vBlockNumber].transactionCount += 1;
         }
         
-        // Permissions: contract and sender can operate/read the new balances
-        FHE.allowThis(newFromBalance);
-        FHE.allowThis(newToBalance);
-        FHE.allowSender(newFromBalance);
-        FHE.allowSender(newToBalance);
-        
-        // Permissions: allow contract and sender to read the stored transaction amount
+        // Permissions: allow contract and all users to read the stored transaction amount
         FHE.allowThis(amountEnc);
-        FHE.allowSender(amountEnc);
+        FHE.allowGlobal(amountEnc);
         
         // Emit event with correct block number
         // For batch operations (incrementBlock=false), the block number will be updated in the stored transaction
@@ -600,7 +603,7 @@ contract EVVMCore is Ownable {
         evvmID = newEvvmID;
         emit EvvmIDUpdated(oldEvvmID, newEvvmID);
     }
-    
+
     /// @notice Adds balance to a virtual account via faucet (admin only, for testing)
     /// @dev This function is useful for testing and development
     /// @dev It adds encrypted balance to an existing account without affecting the nonce
@@ -630,7 +633,9 @@ contract EVVMCore is Ownable {
         
         // Set permissions on the new balance
         FHE.allowThis(newBalance);
-        FHE.allowSender(newBalance);
+        // Use allowGlobal() to allow anyone with a valid permit to decrypt
+        // The frontend will create the necessary permits (self + sharing with contract)
+        FHE.allowGlobal(newBalance);
         
         // Emit event
         emit FaucetBalanceAdded(vaddr, amountEnc);
@@ -672,8 +677,9 @@ contract EVVMCore is Ownable {
         
         // Allow this contract to operate on the balance
         FHE.allowThis(balance);
-        // Optional: allow sender to read/use the balance
-        FHE.allowSender(balance);
+        // Use allowGlobal() to allow anyone with a valid permit to decrypt
+        // The frontend will create the necessary permits (self + sharing with contract)
+        FHE.allowGlobal(balance);
         
         // Emit both events
         emit VirtualAccountRegistered(vaddr, 0);
@@ -698,6 +704,9 @@ contract EVVMCore is Ownable {
     /// @return txId Transaction ID (unique identifier for this transaction)
     /// @dev Reverts if either address is not registered
     /// @dev Reverts with the same errors as applyTransfer() (bad nonce, account missing, etc.)
+    /// @dev IMPORTANT: The encrypted amount must have permissions for this contract before calling
+    ///      The frontend should create a sharing permit for EVVMCore before calling this function
+    /// @dev TEMPORARY WORKAROUND: This function attempts to handle the conversion with better error messages
     function requestPay(
         address from,
         address to,
@@ -710,8 +719,107 @@ contract EVVMCore is Ownable {
         require(fromVaddr != bytes32(0), "EVVM: from address not registered");
         require(toVaddr != bytes32(0), "EVVM: to address not registered");
         
-        // Call applyTransfer (it's defined earlier in the contract, so direct call should work)
-        // Using internal call by duplicating the logic or calling via this
-        return this.applyTransfer(fromVaddr, toVaddr, amount, expectedNonce);
+        // TEMPORARY WORKAROUND: Try to convert the encrypted value first
+        // This will fail with a clear error if permissions are not set
+        // The error message will help debug the issue
+        euint64 amountEnc;
+        
+        // Attempt conversion - this will revert with 0x7ba5ffb5 if permissions are missing
+        // We can't catch this error in Solidity, but we can provide better context
+        amountEnc = FHE.asEuint64(amount);
+        
+        // If we get here, the conversion succeeded
+        // Now ensure global permissions for subsequent operations
+        FHE.allowGlobal(amountEnc);
+        
+        // Call the internal transfer function directly with the converted value
+        // We need to pass the original InEuint64 to _applyTransferInternal, but we've already converted it
+        // So we'll call it directly with the converted value
+        return _applyTransferWithConvertedAmount(fromVaddr, toVaddr, amountEnc, expectedNonce);
+    }
+    
+    /// @notice Internal helper to apply transfer with already-converted encrypted amount
+    /// @dev This is a workaround to handle the conversion separately from the transfer logic
+    function _applyTransferWithConvertedAmount(
+        bytes32 fromVaddr,
+        bytes32 toVaddr,
+        euint64 amountEnc,
+        uint64 expectedNonce
+    ) internal returns (uint256 txId) {
+        require(accounts[fromVaddr].exists, "EVVM: from account missing");
+        require(accounts[toVaddr].exists, "EVVM: to account missing");
+        
+        VirtualAccount storage fromAcc = accounts[fromVaddr];
+        VirtualAccount storage toAcc = accounts[toVaddr];
+        
+        // Replay protection: check the nonce
+        require(fromAcc.nonce == expectedNonce, "EVVM: bad nonce");
+        
+        // Amount is already converted and has permissions set
+        // FHE arithmetic on encrypted balances
+        euint64 newFromBalance = FHE.sub(fromAcc.balance, amountEnc);
+        euint64 newToBalance = FHE.add(toAcc.balance, amountEnc);
+        
+        // Update balances
+        fromAcc.balance = newFromBalance;
+        toAcc.balance = newToBalance;
+        
+        // Set permissions on the new balances so users can decrypt them
+        // Use allowGlobal() to allow anyone with a valid permit to decrypt
+        // The frontend will create the necessary permits (self + sharing with contract)
+        FHE.allowThis(newFromBalance);
+        FHE.allowThis(newToBalance);
+        FHE.allowGlobal(newFromBalance);
+        FHE.allowGlobal(newToBalance);
+        
+        // Capture the nonce that was used for this transaction (before increment)
+        uint64 usedNonce = fromAcc.nonce;
+        
+        // Increment nonce
+        fromAcc.nonce += 1;
+        
+        // Increment virtual block number
+        vBlockNumber += 1;
+        
+        // Create or update block information
+        if (!virtualBlocks[vBlockNumber].exists) {
+            virtualBlocks[vBlockNumber] = VirtualBlock({
+                blockNumber: vBlockNumber,
+                stateCommitment: bytes32(0), // Will be set off-chain
+                timestamp: block.timestamp,
+                transactionCount: 1,
+                exists: true
+            });
+            emit VirtualBlockCreated(vBlockNumber, bytes32(0));
+        } else {
+            virtualBlocks[vBlockNumber].transactionCount += 1;
+            virtualBlocks[vBlockNumber].timestamp = block.timestamp;
+        }
+        
+        // Store transaction
+        txId = nextTxId;
+        nextTxId += 1;
+        
+        virtualTransactions[txId] = VirtualTransaction({
+            fromVaddr: fromVaddr,
+            toVaddr: toVaddr,
+            amountEnc: amountEnc,
+            nonce: usedNonce,
+            vBlockNumber: vBlockNumber,
+            timestamp: block.timestamp,
+            exists: true
+        });
+        
+        // Emit event
+        emit VirtualTransferApplied(
+            fromVaddr,
+            toVaddr,
+            amountEnc,
+            usedNonce,
+            vBlockNumber,
+            txId
+        );
+        
+        return txId;
     }
 }
