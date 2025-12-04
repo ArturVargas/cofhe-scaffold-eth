@@ -24,7 +24,8 @@ async function main() {
   // Parse command line arguments and environment variables
   // Note: Hardhat intercepts --flags, so we use environment variables as alternative
   // You can also pass arguments after the script name: node scripts/calculateStateCommitment.ts --update-on-chain
-  const scriptArgs = process.argv.slice(process.argv.indexOf("calculateStateCommitment.ts") + 1);
+  const scriptIndex = process.argv.indexOf("calculateStateCommitment.ts");
+  const scriptArgs = scriptIndex !== -1 ? process.argv.slice(scriptIndex + 1) : [];
 
   let evvmCoreAddress: string | null = null;
   const updateOnChain = process.env.UPDATE_ON_CHAIN === "true" || scriptArgs.includes("--update-on-chain");

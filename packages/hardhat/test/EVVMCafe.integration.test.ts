@@ -116,7 +116,8 @@ describe("EVVMCafe Integration", function () {
       const priceEncryptResult = await clientClient.encryptInputs([Encryptable.uint64(totalPrice)]).encrypt();
       const [totalPriceEnc] = await hre.cofhesdk.expectResultSuccess(priceEncryptResult);
 
-      const evvmNonce = await evvmCore.getNonce(evvmCore.getVaddrFromAddress(client.address));
+      const clientVaddr = await evvmCore.getVaddrFromAddress(client.address);
+      const evvmNonce = await evvmCore.getNonce(clientVaddr);
 
       // Place order
       await evvmCafe.connect(client).orderCoffee(
@@ -183,14 +184,16 @@ describe("EVVMCafe Integration", function () {
       const priceEncryptResult = await clientClient.encryptInputs([Encryptable.uint64(4n)]).encrypt();
       const [totalPriceEnc] = await hre.cofhesdk.expectResultSuccess(priceEncryptResult);
 
-      const evvmNonce = await evvmCore.getNonce(evvmCore.getVaddrFromAddress(client.address));
+      const clientVaddr = await evvmCore.getVaddrFromAddress(client.address);
+      const evvmNonce = await evvmCore.getNonce(clientVaddr);
       const serviceNonce = 1;
 
       // First order succeeds
       await evvmCafe.connect(client).orderCoffee(client.address, "espresso", 2, totalPriceEnc, serviceNonce, evvmNonce);
 
       // Second order with same service nonce should fail
-      const newEvvmNonce = await evvmCore.getNonce(evvmCore.getVaddrFromAddress(client.address));
+      const newClientVaddr = await evvmCore.getVaddrFromAddress(client.address);
+      const newEvvmNonce = await evvmCore.getNonce(newClientVaddr);
       await expect(
         evvmCafe.connect(client).orderCoffee(
           client.address,
